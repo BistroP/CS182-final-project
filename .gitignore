@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.DS_Store
+# datasets and per-run outputs (regenerate with prepare_shakespeare.py / train_gpt.py)
+data/
+runs/
+*.pt
