@@ -84,4 +84,19 @@ Measured on an **M3 Pro (MPS)**, 10.73M model, batch 64 × ctx 256, `python benc
 | TruncatedSGD 5% | 697 ms | 1.27 | 106 min |
 | SGD | 6 ms | 0.64 | 53 min |
 
-Too slow for sweeps locally (SVD/eigh run on CPU under MPS). GPU numbers: run `bench.py` on Colab and add them here.
+Too slow for sweeps locally (SVD/eigh run on CPU under MPS).
+
+Measured on a **Colab NVIDIA L4** (bf16 autocast, batched maps), same model:
+
+| optimizer | optimizer step | s/iter | 1500 iters | 5000 iters |
+|---|---|---|---|---|
+| Muon | 11.7 ms | 0.062 | 1.6 min | 5.2 min |
+| Kaon | 6.7 ms | 0.060 | 1.5 min | 5.0 min |
+| Freon c=2/3 (svd) | 345 ms | 0.424 | 10.6 min | 35.3 min |
+| Freon c=2/3 (eigh) | 174 ms | 0.233 | 5.8 min | 19.4 min |
+| TruncatedSGD 5% (svd) | 344 ms | 0.428 | 10.7 min | 35.6 min |
+| SGD | 1.5 ms | 0.056 | 1.4 min | 4.6 min |
+| AdamW | - | 0.057 | 1.4 min | 4.8 min |
+
+Use `--freon_impl eigh` on GPU. Colab T4 (no native bf16) was ~8x slower: Muon 0.52 s/iter.
+Freon and TruncatedSGD are dominated by the per-step decomposition, not the forward/backward pass.
