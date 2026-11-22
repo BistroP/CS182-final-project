@@ -85,3 +85,38 @@ Measured on an **M3 Pro (MPS)**, 10.73M model, batch 64 × ctx 256, `python benc
 | SGD | 6 ms | 0.64 | 53 min |
 
 Too slow for sweeps locally (SVD/eigh run on CPU under MPS). GPU numbers: run `bench.py` on Colab and add them here.
+
+## CIFAR-10 (all three hypotheses)
+
+Separate from the Shakespeare/GPT code; nothing above is changed by it.
+
+| path | what |
+|---|---|
+| `spectral/vision.py` | `ViT` (dim 256, depth 6, heads 4, patch 4, ~3.2M params, 24 spectral matrices) and a small `ResNet` (widths 64/128/256, conv filters flattened to `(out, in·kh·kw)`). Patch-embed/stem, head, pos-emb, cls token and norms go to AdamW. |
+| `spectral/cstar.py` | Hypothesis 3 estimator: per spectral layer, fit `log σᵢ ≈ −α log i` on the gradient and `log kᵢ ≈ −β log i` with `kᵢ = ‖X vᵢ‖²/n` (X = layer inputs, unfolded patches for convs), `c⋆ = β/(2α)` clamped to [−0.5, 1.5]. |
+| `train_cifar.py` | one run (CLI + `run(cfg)`); data lives on the device with on-device crop+flip; bf16 autocast on CUDA; `--cstar_every N` logs c⋆ every N epochs; logs to `runs/cifar/.../log.json` |
+| `sweep_cifar.py` | `tune` (16-point grid; a larger-lr grid for sgd/truncsgd), `scale` (ρ × 3 seeds), `csweep` (Freon over c ∈ {0 … 1} × 3 seeds, c⋆ logged every 5 epochs). Resumable JSONL. `--set arch=resnet epochs=50` passes config through. |
+| `analyze_cifar.py` | tables + plots: best lrs per optimiser (prints the `scale` command), accuracy vs ρ (mean ± 2 std), accuracy vs c with the predicted c⋆ line |
+| `tests/test_cifar.py` | model splits, augmentation, c⋆ recovery on synthetic spectra, probe has no side effects, fake-data training smoke tests |
+
+```bash
+python train_cifar.py --dataset fake --epochs 1 --dim 64 --depth 2   # smoke test, no download
+python train_cifar.py --optimizer freon --c 0.6667                   # downloads CIFAR-10 to data/cifar10
+
+# H1: optimiser comparison
+python sweep_cifar.py tune --opts muon kaon freon:0.6667 freon:0.75 sgd truncsgd:0.05 --out results/cifar_tune.jsonl
+python analyze_cifar.py tune results/cifar_tune.jsonl          # prints the scale command
+python sweep_cifar.py scale --opts muon:<m>:<b> ... --out results/cifar_scale.jsonl
+python analyze_cifar.py scale results/cifar_scale.jsonl
+# H2 (vision): run the same H1 commands with --set arch=resnet for a conv-net comparison
+# H3: is the empirically best c close to the predicted c*?
+python sweep_cifar.py csweep --lrs <freon m> <freon b> --out results/cifar_csweep.jsonl
+python analyze_cifar.py csweep results/cifar_csweep.jsonl
+```
+
+`train_cifar.py` / `sweep_cifar.py` take the same speed options as the GPT scripts (`--freon_impl eigh`, `--no-amp`,
+TF32 on CUDA; run `bench.py` to choose the Freon implementation) and `sweep_cifar.py` reuses `sweep.py`'s spec parsing
+and resume logic, so spec strings and `--rhos 1` final runs work the same way.
+
+Defaults that are my choices (change in `CifarConfig`): 30 epochs, batch 512, 1 warmup epoch + cosine to 10%,
+AdamW wd 0.05 on non-spectral matrices, no label smoothing, c⋆ probe = 256 fixed un-augmented training images.
