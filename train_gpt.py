@@ -11,6 +11,7 @@ Hidden transformer-block matrices (4 per block) use the spectral optimiser at
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import json
 import math
@@ -29,6 +30,7 @@ from spectral.gpt import GPT, GPTConfig
 class TrainConfig:
     optimizer: str = "muon"  # muon | kaon | freon | sgd | truncsgd | adamw
     c: float = 2 / 3  # Freon exponent (0 = SGD-like, 1/2 = Muon, 1 = pseudo-inverse-like)
+    freon_impl: str = "svd"  # svd | eigh  (eigh = float64 Gram eigendecomposition, often faster on GPU)
     trunc_frac: float = 0.05  # TruncatedSGD: fraction of top singular values zeroed
     ns_steps: int = 5  # Newton-Schulz / Kaon iterations
     matrix_lr: float = 0.02
@@ -50,6 +52,8 @@ class TrainConfig:
     data_dir: str = "data/shakespeare_char"
     out_dir: str = "runs/debug"
     device: str = "auto"
+    amp: bool = True  # bf16 autocast for the model forward/backward (CUDA only)
+    compile: bool = False  # torch.compile the model (CUDA; first iterations are slow)
 
 
 def pick_device(name: str) -> torch.device:
@@ -81,7 +85,7 @@ def build_optimizers(model, cfg: TrainConfig):
     kw = {
         "muon": {"steps": cfg.ns_steps},
         "kaon": {"steps": cfg.ns_steps},
-        "freon": {"c": cfg.c},
+        "freon": {"c": cfg.c, "impl": cfg.freon_impl},
         "truncsgd": {"frac": cfg.trunc_frac},
         "sgd": {},
     }[cfg.optimizer]
@@ -100,15 +104,19 @@ class Data:
     def __init__(self, data_dir: str, block_size: int, batch_size: int, device: torch.device):
         d = Path(data_dir)
         self.meta = json.loads((d / "meta.json").read_text())
-        self.splits = {s: np.memmap(d / f"{s}.bin", dtype=np.uint16, mode="r") for s in ("train", "val")}
+        # whole corpus lives on the accelerator (~1 MB of tokens): no per-step host copies
+        self.splits = {
+            s: torch.from_numpy(np.fromfile(d / f"{s}.bin", dtype=np.uint16).astype(np.int64)).to(device)
+            for s in ("train", "val")
+        }
         self.T, self.B, self.device = block_size, batch_size, device
+        self.offsets = torch.arange(block_size, device=device)
 
     def batch(self, split: str, gen: torch.Generator):
         data = self.splits[split]
-        ix = torch.randint(len(data) - self.T - 1, (self.B,), generator=gen)
-        x = torch.stack([torch.from_numpy(data[i : i + self.T].astype(np.int64)) for i in ix])
-        y = torch.stack([torch.from_numpy(data[i + 1 : i + 1 + self.T].astype(np.int64)) for i in ix])
-        return x.to(self.device), y.to(self.device)
+        ix = torch.randint(len(data) - self.T - 1, (self.B,), generator=gen).to(self.device)
+        idx = ix[:, None] + self.offsets  # (B, T)
+        return data[idx], data[idx + 1]
 
 
 @torch.no_grad()
@@ -147,9 +155,29 @@ def run(cfg: TrainConfig, verbose: bool = True) -> dict:
     if verbose:
         print(f"{cfg.optimizer} c={cfg.c:.3f} seed={cfg.seed} device={device} params={model.num_params()/1e6:.2f}M")
 
+    use_cuda = device.type == "cuda"
+    if use_cuda:
+        torch.set_float32_matmul_precision("high")  # TF32 for fp32 matmuls (Newton-Schulz etc.)
+    amp = torch.autocast("cuda", dtype=torch.bfloat16) if (use_cuda and cfg.amp) else contextlib.nullcontext()
+    fwd = torch.compile(model) if cfg.compile else model
+
+    def sync():
+        if use_cuda:
+            torch.cuda.synchronize()
+        elif device.type == "mps":
+            torch.mps.synchronize()
+
+    t_warm, t_end, diverged = None, None, False
     for it in range(cfg.max_iters + 1):
+        if it == 10:
+            sync()
+            t_warm = time.time()  # steady-state timing starts after 10 warm-up iterations
         if it % cfg.eval_interval == 0 or it == cfg.max_iters:
-            ev = evaluate(model, data, cfg, seed=1234)
+            if it == cfg.max_iters:
+                sync()
+                t_end = time.time()
+            with amp:
+                ev = evaluate(model, data, cfg, seed=1234)
             log.append({"iter": it, "train_loss": ev["train"], "val_loss": ev["val"], "time": time.time() - t0})
             if verbose:
                 print(f"iter {it:5d} train {ev['train']:.4f} val {ev['val']:.4f} ({time.time()-t0:.0f}s)")
@@ -162,18 +190,27 @@ def run(cfg: TrainConfig, verbose: bool = True) -> dict:
             for g, lr in zip(o.param_groups, lrs):
                 g["lr"] = lr * s
         x, y = data.batch("train", gen)
-        _, loss = model(x, y)
+        with amp:
+            _, loss = fwd(x, y)
         for o in opts:
             o.zero_grad(set_to_none=True)
         loss.backward()
         for o in opts:
             o.step()
+        if it % 50 == 0 and not math.isfinite(loss.item()):  # abort diverged runs early
+            diverged = True
+            log.append({"iter": it, "train_loss": float("nan"), "val_loss": float("nan"), "time": time.time() - t0})
+            break
 
+    spi = None
+    if t_warm is not None and t_end is not None and cfg.max_iters > 10 and not diverged:
+        spi = (t_end - t_warm) / (cfg.max_iters - 10)
     res = {
         "config": dataclasses.asdict(cfg),
         "final_val_loss": log[-1]["val_loss"],
-        "best_val_loss": min(r["val_loss"] for r in log),
-        "diverged": not math.isfinite(log[-1]["val_loss"]),
+        "best_val_loss": min((r["val_loss"] for r in log if math.isfinite(r["val_loss"])), default=float("nan")),
+        "diverged": diverged or not math.isfinite(log[-1]["val_loss"]),
+        "sec_per_iter": spi,
         "log": log,
     }
     (out / "log.json").write_text(json.dumps(res, indent=1))
@@ -183,7 +220,10 @@ def run(cfg: TrainConfig, verbose: bool = True) -> dict:
 def parse_args() -> TrainConfig:
     ap = argparse.ArgumentParser()
     for f in dataclasses.fields(TrainConfig):
-        ap.add_argument(f"--{f.name}", type=type(f.default), default=f.default)
+        if isinstance(f.default, bool):  # --amp / --no-amp
+            ap.add_argument(f"--{f.name}", action=argparse.BooleanOptionalAction, default=f.default)
+        else:
+            ap.add_argument(f"--{f.name}", type=type(f.default), default=f.default)
     return TrainConfig(**vars(ap.parse_args()))
 
 

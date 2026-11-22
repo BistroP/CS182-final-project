@@ -104,6 +104,50 @@ def test_truncsgd_zeroes_top_and_keeps_norm():
     assert torch.equal(truncsgd_map(G, 0.0), G.float())
 
 
+@pytest.mark.parametrize("c", [0.25, 0.5, 2 / 3, 1.0])
+def test_freon_eigh_matches_svd(c):
+    G = make_G()
+    a, b = freon_map(G, c, impl="svd"), freon_map(G, c, impl="eigh")
+    assert torch.allclose(a, b, rtol=1e-3, atol=1e-4), (a - b).abs().max()
+    assert torch.allclose(freon_map(G.T.contiguous(), c, impl="eigh"), b.T, atol=1e-4)
+
+
+@pytest.mark.parametrize("fn", [
+    lambda G: muon_map(G), lambda G: kaon_map(G), lambda G: truncsgd_map(G, 0.1),
+    lambda G: freon_map(G, 2 / 3), lambda G: freon_map(G, 2 / 3, impl="eigh"),
+])
+@pytest.mark.parametrize("shape", [(32, 96), (96, 32)])
+def test_maps_are_batch_consistent(fn, shape):
+    Gs = torch.stack([make_G(32, 96, seed=s) for s in range(4)])
+    Gs = Gs if shape == (32, 96) else Gs.mT.contiguous()
+    batched = fn(Gs)
+    assert batched.shape == Gs.shape
+    for i in range(4):
+        assert torch.allclose(batched[i], fn(Gs[i]), rtol=1e-3, atol=1e-4)
+
+
+def test_optimizer_batching_matches_per_param():
+    torch.manual_seed(0)
+    def make():
+        torch.manual_seed(1)
+        return [torch.nn.Parameter(torch.randn(16, 48)) for _ in range(3)] + [torch.nn.Parameter(torch.randn(24, 16))]
+    for method, kw in [("muon", {}), ("freon", {"c": 0.6})]:
+        ps = make()
+        opt = SpectralOptimizer(ps, lr=0.1, method=method, method_kwargs=kw)
+        for p in ps:
+            p.grad = torch.randn_like(p)
+        grads = [p.grad.clone() for p in ps]
+        before = [p.detach().clone() for p in ps]
+        opt.step()
+        for p, g, p0 in zip(ps, grads, before):
+            # first step with Nesterov: g_eff = g*(1-m) + m*(1-m)*g ... just recompute via the map
+            m = 0.95
+            buf = (1 - m) * g
+            g_eff = g.lerp(buf, m)
+            D = (muon_map(g_eff) if method == "muon" else freon_map(g_eff, 0.6)) * max(1.0, p.shape[0] / p.shape[1]) ** 0.5
+            assert torch.allclose(p0 - 0.1 * D, p.detach(), rtol=1e-3, atol=1e-4)
+
+
 def test_optimizer_decreases_quadratic_for_every_method():
     torch.manual_seed(0)
     target = torch.randn(32, 48)

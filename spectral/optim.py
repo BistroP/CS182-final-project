@@ -50,6 +50,9 @@ class SpectralOptimizer(torch.optim.Optimizer):
         for group in self.param_groups:
             lr, mom = group["lr"], group["momentum"]
             method, kw = group["method"], group["method_kwargs"]
+            # Bucket same-shaped matrices so each spectral map runs once per shape on a
+            # stacked batch (e.g. the 6 c_attn matrices) instead of once per matrix.
+            buckets: dict[tuple, list] = {}
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -60,15 +63,17 @@ class SpectralOptimizer(torch.optim.Optimizer):
                 buf = state["buf"]
                 buf.lerp_(g, 1.0 - mom)  # EMA of gradients
                 g_eff = g.lerp(buf, mom) if group["nesterov"] else buf
-
                 m, n = p.shape[0], p[0].numel()  # conv filters (out,in,kh,kw) -> (out, in*kh*kw)
-                D = apply_map(g_eff.reshape(m, n), method, **kw)
+                buckets.setdefault((m, n), []).append((p, g_eff.reshape(m, n)))
+
+            for (m, n), items in buckets.items():
+                D = apply_map(torch.stack([g for _, g in items]), method, **kw)
                 if method in NORMALISED:
                     D = D * max(1.0, m / n) ** 0.5
-
-                if group["weight_decay"]:
-                    p.mul_(1.0 - lr * group["weight_decay"])
-                p.add_(D.reshape(p.shape).to(p.dtype), alpha=-lr)
+                for (p, _), d in zip(items, D):
+                    if group["weight_decay"]:
+                        p.mul_(1.0 - lr * group["weight_decay"])
+                    p.add_(d.reshape(p.shape).to(p.dtype), alpha=-lr)
         return loss
 
 

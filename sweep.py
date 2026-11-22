@@ -26,6 +26,8 @@ TUNE_GRID = [
     (1e-2, 2e-3), (1e-2, 4e-3), (1e-2, 8e-3), (1e-2, 2e-2),
     (2e-2, 2e-3), (2e-2, 4e-3), (2e-2, 8e-3), (2e-2, 2e-2),
 ]
+# SGD / TruncatedSGD act on the raw gradient, so the Muon-scale grid above is far too small for them.
+SGD_GRID = [(m, b) for m in (0.05, 0.1, 0.2, 0.5, 1.0) for b in (1e-3, 2e-3, 4e-3)]
 RHOS = [0.03, 0.1, 0.3, 1, 3, 10, 30]
 SEEDS = [42, 43, 44]
 
@@ -54,17 +56,36 @@ def done_keys(path: Path) -> set:
     }
 
 
+def print_best(path: Path):
+    """Best (matrix_lr, base_lr) per optimiser from a tune file, as ready-to-paste scale specs."""
+    rows = [json.loads(l) for l in path.read_text().splitlines()]
+    for tag in sorted({r["tag"] for r in rows}):
+        ok = [r for r in rows if r["tag"] == tag and not r["diverged"] and r["final_val_loss"] == r["final_val_loss"]]
+        if not ok:
+            print(f"{tag}: every run diverged")
+            continue
+        b = min(ok, key=lambda r: r["final_val_loss"])
+        print(f"{b['tag']}:{b['matrix_lr']:g}:{b['base_lr']:g}    val={b['final_val_loss']:.4f} "
+              f"({len(ok)}/{sum(r['tag'] == tag for r in rows)} runs ok)")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["tune", "scale"])
-    ap.add_argument("--opts", nargs="+", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("mode", choices=["tune", "scale", "best"])
+    ap.add_argument("--opts", nargs="+", default=[])
+    ap.add_argument("--out", default=None, help="results .jsonl (for `best`: the file to read)")
+    ap.add_argument("--rhos", type=float, nargs="+", default=RHOS, help="scale mode: lr multipliers (use 1 for final runs)")
     ap.add_argument("--seeds", type=int, nargs="+", default=SEEDS)
     ap.add_argument("--max_iters", type=int, default=5000)
     ap.add_argument("--data_dir", default="data/shakespeare_char")
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--freon_impl", default="svd", choices=["svd", "eigh"], help="pick the faster one from bench.py")
+    ap.add_argument("--compile", action="store_true")
     args = ap.parse_args()
 
+    if args.mode == "best":
+        return print_best(Path(args.out))
+    assert args.opts and args.out, "--opts and --out are required for tune/scale"
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     seen = done_keys(out)
@@ -74,10 +95,11 @@ def main():
         kw, lrs = parse_spec(spec)
         tag = spec.split(":")[0] + (f":{kw['c']}" if "c" in kw else "") + (f":{kw['trunc_frac']}" if "trunc_frac" in kw else "")
         if args.mode == "tune":
-            jobs += [(tag, kw, m, b, args.seeds[0]) for m, b in TUNE_GRID]
+            grid = SGD_GRID if kw["optimizer"] in ("sgd", "truncsgd") else TUNE_GRID
+            jobs += [(tag, kw, m, b, args.seeds[0]) for m, b in grid]
         else:
             assert lrs, f"scale mode needs {spec} to carry :matrix_lr:base_lr"
-            jobs += [(tag, kw, lrs[0] * r, lrs[1] * r, s) for r in RHOS for s in args.seeds]
+            jobs += [(tag, kw, lrs[0] * r, lrs[1] * r, s) for r in args.rhos for s in args.seeds]
 
     for tag, kw, m, b, seed in jobs:
         key = (tag, m, b, seed)
@@ -86,6 +108,7 @@ def main():
         cfg = TrainConfig(
             **kw, matrix_lr=m, base_lr=b, seed=seed, max_iters=args.max_iters,
             data_dir=args.data_dir, device=args.device,
+            freon_impl=args.freon_impl, compile=args.compile,
             out_dir=f"runs/{args.mode}/{tag.replace(':', '_')}_m{m:g}_b{b:g}_s{seed}",
         )
         res = run(cfg, verbose=False)

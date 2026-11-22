@@ -1,8 +1,8 @@
 """Spectral maps: G -> D, where D keeps G's singular vectors but changes the spectrum.
 
-All maps take a 2D gradient/momentum matrix and return a float32 matrix of the same
-shape. Internally the matrix is oriented "wide" (rows <= cols) so that the Gram matrix
-X X^T is the small one.
+All maps take a gradient/momentum matrix, or a *batch* of same-shaped matrices
+(..., m, n), and return float32 of the same shape. Internally each matrix is oriented
+"wide" (rows <= cols) so that the Gram matrix X X^T is the small one.
 
 Reference: Shumaylov et al., "Muon is Not That Special" (arXiv 2605.11181).
     muon_map       Algorithm 1 (quintic Newton-Schulz, Keller Jordan's coefficients)
@@ -24,21 +24,27 @@ NS_COEFFS = (3.4445, -4.7750, 2.0315)
 KAON_LAMBDA = 4.1
 KAON_SUPPORT = 1.175
 
+_FRO = dict(dim=(-2, -1), keepdim=True)
+
 
 def _orient(G: torch.Tensor) -> tuple[torch.Tensor, bool]:
-    """float32 copy with rows <= cols; returns (X, transposed)."""
+    """float32 copy with rows <= cols (on the last two dims); returns (X, transposed)."""
     X = G.detach().float()
-    transposed = X.size(0) > X.size(1)
-    return (X.T if transposed else X), transposed
+    transposed = X.size(-2) > X.size(-1)
+    return (X.mT if transposed else X), transposed
 
 
 def _unorient(X: torch.Tensor, transposed: bool) -> torch.Tensor:
-    return X.T if transposed else X
+    return X.mT if transposed else X
+
+
+def _cpu_fallback(X: torch.Tensor) -> bool:
+    return X.device.type == "mps"  # MPS has no SVD/eigh (and no float64)
 
 
 def _svd(X: torch.Tensor):
-    """Thin SVD. torch.linalg.svd is not implemented on MPS, so fall back to CPU."""
-    if X.device.type == "mps":
+    """Thin SVD (batched). Falls back to CPU on MPS."""
+    if _cpu_fallback(X):
         U, S, Vh = torch.linalg.svd(X.cpu(), full_matrices=False)
         return U.to(X.device), S.to(X.device), Vh.to(X.device)
     return torch.linalg.svd(X, full_matrices=False)
@@ -47,10 +53,10 @@ def _svd(X: torch.Tensor):
 # --------------------------------------------------------------------------- Muon
 def muon_map(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
     X, tr = _orient(G)
-    X = X / (X.norm() + eps)
+    X = X / (X.norm(**_FRO) + eps)
     a, b, c = NS_COEFFS
     for _ in range(steps):
-        A = X @ X.T
+        A = X @ X.mT
         B = b * A + c * (A @ A)
         X = a * X + B @ X
     return _unorient(X, tr)
@@ -68,10 +74,10 @@ def kaon_map(
     iterated `steps` times from sigma/||G||_F, then divided by the support edge so the
     output spectrum lies in (0, 1]."""
     X, tr = _orient(G)
-    X = X / (X.norm() + eps)
-    I = torch.eye(X.size(0), device=X.device, dtype=X.dtype)
+    X = X / (X.norm(**_FRO) + eps)
+    I = torch.eye(X.size(-2), device=X.device, dtype=X.dtype)
     for _ in range(steps):
-        B = I - X @ X.T
+        B = I - X @ X.mT
         X = lam * (B @ B @ X)
     return _unorient(X / support, tr)
 
@@ -84,26 +90,43 @@ def kaon_scalar_map(x: torch.Tensor, steps: int = 5, lam: float = KAON_LAMBDA) -
 
 
 # --------------------------------------------------------------------------- Freon
-def freon_map(G: torch.Tensor, c: float, rel_eps: float = 1e-10) -> torch.Tensor:
-    """Exact (SVD-based) Freon direction, D = (G G^T)^{-c} G = U diag(sigma^{1-2c}) V^T,
-    normalised so that the update has mean-q-norm 1 with q = 2(1-c) (paper Sec 2.4.1 and
-    App H.3):  sigma_tilde = sigma / mu_c,  mu_c = (mean sigma^q)^{1/q}.
+def _power_mean(S: torch.Tensor, q: float) -> torch.Tensor:
+    if abs(q) < 1e-6:  # q -> 0: geometric mean
+        return torch.exp(torch.log(S).mean(-1, keepdim=True))
+    return (S**q).mean(-1, keepdim=True) ** (1.0 / q)
+
+
+def freon_map(G: torch.Tensor, c: float, rel_eps: float = 1e-10, impl: str = "svd") -> torch.Tensor:
+    """Exact Freon direction, D = (G G^T)^{-c} G = U diag(sigma^{1-2c}) V^T, normalised so
+    the update has mean-q-norm 1 with q = 2(1-c) (paper Sec 2.4.1 and App H.3):
+    sigma_tilde = sigma / mu_c,  mu_c = (mean sigma^q)^{1/q}.
 
         c = 0    -> normalised SGD direction  (spectrum ∝ sigma)
         c = 1/2  -> exact polar factor U V^T  (Muon's ideal target)
         c in (1/2, 1] -> the quasi-norm regime (q in [0, 1)); c = 1 is the q -> 0 limit
                          where mu_c is the geometric mean of sigma.
+
+    impl="svd":  thin SVD of G (reference; slow on GPU for 384x1152).
+    impl="eigh": eigendecomposition of the float64 Gram matrix X X^T. Usually faster on
+                 GPU; accurate while sigma_min/sigma_max >~ 1e-7 (smaller values are
+                 floored), which is far beyond what a bf16/fp32 gradient carries.
     """
     X, tr = _orient(G)
-    U, S, Vh = _svd(X)
-    S = S.clamp_min(S.max().item() * rel_eps + 1e-30)
-    q = 2.0 * (1.0 - c)
-    if abs(q) < 1e-6:  # c = 1: geometric mean
-        mu = torch.exp(torch.log(S).mean())
+    if impl == "svd":
+        U, S, Vh = _svd(X)
+        S = S.clamp_min(S.amax(-1, keepdim=True) * rel_eps + 1e-30)
+        S_new = (S / _power_mean(S, 2.0 * (1.0 - c))) ** (1.0 - 2.0 * c)
+        out = (U * S_new.unsqueeze(-2)) @ Vh
+    elif impl == "eigh":
+        dev = X.device
+        Xd = X.cpu().double() if _cpu_fallback(X) else X.double()
+        lam, Q = torch.linalg.eigh(Xd @ Xd.mT)
+        S = lam.clamp_min(lam.amax(-1, keepdim=True) * 1e-14 + 1e-300).sqrt()
+        scale = (S / _power_mean(S, 2.0 * (1.0 - c))) ** (1.0 - 2.0 * c) / S  # sigma_new / sigma
+        out = (Q @ (scale.unsqueeze(-1) * (Q.mT @ Xd))).float().to(dev)
     else:
-        mu = (S**q).mean() ** (1.0 / q)
-    S_new = (S / mu) ** (1.0 - 2.0 * c)
-    return _unorient((U * S_new) @ Vh, tr)
+        raise ValueError(f"unknown freon impl {impl!r}")
+    return _unorient(out, tr)
 
 
 # --------------------------------------------------------------------------- TruncatedSGD
@@ -114,11 +137,11 @@ def truncsgd_map(G: torch.Tensor, frac: float) -> torch.Tensor:
     if frac <= 0:
         return _unorient(X, tr)
     U, S, Vh = _svd(X)
-    k = int(math.ceil(frac * S.numel()))
+    k = int(math.ceil(frac * S.size(-1)))
     S = S.clone()
-    S[:k] = 0.0
-    out = (U * S) @ Vh
-    out = out * (X.norm() / (out.norm() + 1e-30))
+    S[..., :k] = 0.0
+    out = (U * S.unsqueeze(-2)) @ Vh
+    out = out * (X.norm(**_FRO) / (out.norm(**_FRO) + 1e-30))
     return _unorient(out, tr)
 
 
