@@ -14,6 +14,7 @@ Completed (opt, lrs, seed) triples already in the --out file are skipped, so it 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 from pathlib import Path
 
@@ -59,9 +60,12 @@ def done_keys(path: Path) -> set:
     }
 
 
-def print_best(path: Path):
-    """Best (matrix_lr, base_lr) per optimiser from a tune file, as ready-to-paste scale specs."""
-    rows = [json.loads(l) for l in path.read_text().splitlines()]
+def print_best(pattern: str):
+    """Best (matrix_lr, base_lr) per optimiser from tune file(s) (a path or glob like
+    'results/tune*.jsonl'), as ready-to-paste scale specs."""
+    files = sorted(glob.glob(pattern))
+    assert files, f"no files match {pattern!r}"
+    rows = [json.loads(l) for f in files for l in Path(f).read_text().splitlines() if l.strip()]
     for tag in sorted({r["tag"] for r in rows}):
         ok = [r for r in rows if r["tag"] == tag and not r["diverged"] and r["final_val_loss"] == r["final_val_loss"]]
         if not ok:
@@ -91,7 +95,7 @@ def main():
     args = ap.parse_args()
 
     if args.mode == "best":
-        return print_best(Path(args.out))
+        return print_best(args.out)
     assert args.opts and args.out, "--opts and --out are required for tune/scale"
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
