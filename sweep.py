@@ -32,6 +32,10 @@ SGD_GRID = [(m, b) for m in (0.05, 0.1, 0.2, 0.5, 1.0) for b in (1e-3, 2e-3, 4e-
 # Reduced grids (6 points) centred on the paper's Table A.1 picks (matrix_lr 2e-2; base_lr 2e-2 or 8e-3).
 TUNE_GRID_SMALL = [(m, b) for m in (1e-2, 2e-2) for b in (2e-3, 8e-3, 2e-2)]
 SGD_GRID_SMALL = [(m, b) for m in (0.1, 0.3, 1.0) for b in (2e-3, 8e-3)]
+# Focused grids (9 / 6 points) from the muon+kaon full-grid results: both preferred matrix_lr 2e-2 (the grid
+# edge) and low base_lr, so drop the high-base_lr / low-matrix_lr corners and add matrix_lr 4e-2.
+TUNE_GRID_FOCUSED = [(m, b) for m in (1e-2, 2e-2, 4e-2) for b in (5e-4, 1e-3, 2e-3)]
+SGD_GRID_FOCUSED = [(m, b) for m in (0.1, 0.3, 1.0) for b in (1e-3, 2e-3)]
 RHOS = [0.03, 0.1, 0.3, 1, 3, 10, 30]
 SEEDS = [42, 43, 44]
 
@@ -90,7 +94,7 @@ def main():
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
                     help="bf16 autocast on CUDA; use --no-amp on GPUs without bf16 (e.g. T4)")
-    ap.add_argument("--grid", choices=["full", "small"], default="full",
+    ap.add_argument("--grid", choices=["full", "small", "focused"], default="full",
                     help="tune mode: full = paper's 16-point grid, small = 6 points around the paper's picks")
     args = ap.parse_args()
 
@@ -107,7 +111,12 @@ def main():
         tag = spec.split(":")[0] + (f":{kw['c']}" if "c" in kw else "") + (f":{kw['trunc_frac']}" if "trunc_frac" in kw else "")
         if args.mode == "tune":
             is_sgd = kw["optimizer"] in ("sgd", "truncsgd")
-            grid = (SGD_GRID_SMALL if is_sgd else TUNE_GRID_SMALL) if args.grid == "small" else (SGD_GRID if is_sgd else TUNE_GRID)
+            grids = {
+                "full": (TUNE_GRID, SGD_GRID),
+                "small": (TUNE_GRID_SMALL, SGD_GRID_SMALL),
+                "focused": (TUNE_GRID_FOCUSED, SGD_GRID_FOCUSED),
+            }[args.grid]
+            grid = grids[1] if is_sgd else grids[0]
             jobs += [(tag, kw, m, b, args.seeds[0]) for m, b in grid]
         else:
             assert lrs, f"scale mode needs {spec} to carry :matrix_lr:base_lr"
