@@ -60,6 +60,7 @@ def main():
     ap.add_argument("--only", nargs="*", default=None, help="substring filter on config names")
     ap.add_argument("--skip_train", action="store_true", help="only time optimiser steps")
     ap.add_argument("--compile", action="store_true")
+    ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -71,7 +72,7 @@ def main():
         if args.only and not any(s in label for s in args.only):
             continue
         cfg = TrainConfig(**kw, device=str(device), max_iters=args.iters, eval_interval=10**9,
-                          eval_iters=2, data_dir=args.data_dir, out_dir="runs/bench", compile=args.compile)
+                          eval_iters=2, data_dir=args.data_dir, out_dir="runs/bench", compile=args.compile, amp=args.amp)
         row = {"config": label}
         if cfg.optimizer != "adamw":
             row["opt_ms"] = opt_step_ms(cfg, device)

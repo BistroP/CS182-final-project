@@ -28,6 +28,9 @@ TUNE_GRID = [
 ]
 # SGD / TruncatedSGD act on the raw gradient, so the Muon-scale grid above is far too small for them.
 SGD_GRID = [(m, b) for m in (0.05, 0.1, 0.2, 0.5, 1.0) for b in (1e-3, 2e-3, 4e-3)]
+# Reduced grids (6 points) centred on the paper's Table A.1 picks (matrix_lr 2e-2; base_lr 2e-2 or 8e-3).
+TUNE_GRID_SMALL = [(m, b) for m in (1e-2, 2e-2) for b in (2e-3, 8e-3, 2e-2)]
+SGD_GRID_SMALL = [(m, b) for m in (0.1, 0.3, 1.0) for b in (2e-3, 8e-3)]
 RHOS = [0.03, 0.1, 0.3, 1, 3, 10, 30]
 SEEDS = [42, 43, 44]
 
@@ -81,6 +84,10 @@ def main():
     ap.add_argument("--device", default="auto")
     ap.add_argument("--freon_impl", default="svd", choices=["svd", "eigh"], help="pick the faster one from bench.py")
     ap.add_argument("--compile", action="store_true")
+    ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
+                    help="bf16 autocast on CUDA; use --no-amp on GPUs without bf16 (e.g. T4)")
+    ap.add_argument("--grid", choices=["full", "small"], default="full",
+                    help="tune mode: full = paper's 16-point grid, small = 6 points around the paper's picks")
     args = ap.parse_args()
 
     if args.mode == "best":
@@ -95,7 +102,8 @@ def main():
         kw, lrs = parse_spec(spec)
         tag = spec.split(":")[0] + (f":{kw['c']}" if "c" in kw else "") + (f":{kw['trunc_frac']}" if "trunc_frac" in kw else "")
         if args.mode == "tune":
-            grid = SGD_GRID if kw["optimizer"] in ("sgd", "truncsgd") else TUNE_GRID
+            is_sgd = kw["optimizer"] in ("sgd", "truncsgd")
+            grid = (SGD_GRID_SMALL if is_sgd else TUNE_GRID_SMALL) if args.grid == "small" else (SGD_GRID if is_sgd else TUNE_GRID)
             jobs += [(tag, kw, m, b, args.seeds[0]) for m, b in grid]
         else:
             assert lrs, f"scale mode needs {spec} to carry :matrix_lr:base_lr"
@@ -108,7 +116,7 @@ def main():
         cfg = TrainConfig(
             **kw, matrix_lr=m, base_lr=b, seed=seed, max_iters=args.max_iters,
             data_dir=args.data_dir, device=args.device,
-            freon_impl=args.freon_impl, compile=args.compile,
+            freon_impl=args.freon_impl, compile=args.compile, amp=args.amp,
             out_dir=f"runs/{args.mode}/{tag.replace(':', '_')}_m{m:g}_b{b:g}_s{seed}",
         )
         res = run(cfg, verbose=False)
