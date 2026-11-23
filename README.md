@@ -97,6 +97,7 @@ Separate from the Shakespeare/GPT code; nothing above is changed by it.
 | `train_cifar.py` | one run (CLI + `run(cfg)`); data lives on the device with on-device crop+flip; bf16 autocast on CUDA; `--cstar_every N` logs c⋆ every N epochs; logs to `runs/cifar/.../log.json` |
 | `sweep_cifar.py` | `tune` (16-point grid; a larger-lr grid for sgd/truncsgd), `scale` (ρ × 3 seeds), `csweep` (Freon over c ∈ {0 … 1} × 3 seeds, c⋆ logged every 5 epochs). Resumable JSONL. `--set arch=resnet epochs=50` passes config through. |
 | `analyze_cifar.py` | tables + plots: best lrs per optimiser (prints the `scale` command), accuracy vs ρ (mean ± 2 std), accuracy vs c with the predicted c⋆ line |
+| `notebooks/colab_cifar_hypothesis1.ipynb` | Colab pipeline for H1 on CIFAR-10: setup → benchmark → tune → 3-seed final runs → summary (+ optional ρ sweep) |
 | `tests/test_cifar.py` | model splits, augmentation, c⋆ recovery on synthetic spectra, probe has no side effects, fake-data training smoke tests |
 
 ```bash
