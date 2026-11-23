@@ -36,6 +36,9 @@ SGD_GRID_SMALL = [(m, b) for m in (0.1, 0.3, 1.0) for b in (2e-3, 8e-3)]
 # edge) and low base_lr, so drop the high-base_lr / low-matrix_lr corners and add matrix_lr 4e-2.
 TUNE_GRID_FOCUSED = [(m, b) for m in (1e-2, 2e-2, 4e-2) for b in (5e-4, 1e-3, 2e-3)]
 SGD_GRID_FOCUSED = [(m, b) for m in (0.1, 0.3, 1.0) for b in (1e-3, 2e-3)]
+# Stage-1 SGD/TruncatedSGD winners sat at the top of SGD_GRID_FOCUSED (base_lr 2e-3, and truncsgd matrix_lr 1.0, the largest
+# value) with loss still falling as lr grew, so "wide" extends both. Already-finished points are skipped on resume.
+SGD_GRID_WIDE = [(m, b) for m in (0.3, 1.0, 3.0, 10.0) for b in (2e-3, 4e-3)]
 RHOS = [0.03, 0.1, 0.3, 1, 3, 10, 30]
 SEEDS = [42, 43, 44]
 
@@ -105,8 +108,9 @@ def main():
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
                     help="bf16 autocast on CUDA; use --no-amp on GPUs without bf16 (e.g. T4)")
-    ap.add_argument("--grid", choices=["full", "small", "focused"], default="full",
-                    help="tune mode: full = paper's 16-point grid, small = 6 points around the paper's picks")
+    ap.add_argument("--grid", choices=["full", "small", "focused", "wide"], default="full",
+                    help="tune mode: full = paper's 16-point grid, small = 6 points around the paper's picks, focused = 9 pts "
+                         "(spectral) / 6 pts (sgd), wide = focused for spectral + larger-lr grid for sgd/truncsgd")
     args = ap.parse_args()
 
     if args.mode == "best":
@@ -126,6 +130,7 @@ def main():
                 "full": (TUNE_GRID, SGD_GRID),
                 "small": (TUNE_GRID_SMALL, SGD_GRID_SMALL),
                 "focused": (TUNE_GRID_FOCUSED, SGD_GRID_FOCUSED),
+                "wide": (TUNE_GRID_FOCUSED, SGD_GRID_WIDE),
             }[args.grid]
             grid = grids[1] if is_sgd else grids[0]
             jobs += [(tag, kw, m, b, args.seeds[0]) for m, b in grid]
