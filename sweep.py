@@ -64,20 +64,31 @@ def done_keys(path: Path) -> set:
     }
 
 
-def print_best(pattern: str):
-    """Best (matrix_lr, base_lr) per optimiser from tune file(s) (a path or glob like
-    'results/tune*.jsonl'), as ready-to-paste scale specs."""
+def best_runs(pattern: str) -> list[tuple[dict, int, int]]:
+    """Best tune run per optimiser from tune file(s) (a path or glob like 'results/tune*.jsonl'):
+    [(row, n_ok, n_total), ...]. Optimisers whose every run diverged are skipped."""
     files = sorted(glob.glob(pattern))
     assert files, f"no files match {pattern!r}"
     rows = [json.loads(l) for f in files for l in Path(f).read_text().splitlines() if l.strip()]
+    out = []
     for tag in sorted({r["tag"] for r in rows}):
         ok = [r for r in rows if r["tag"] == tag and not r["diverged"] and r["final_val_loss"] == r["final_val_loss"]]
-        if not ok:
+        if ok:
+            out.append((min(ok, key=lambda r: r["final_val_loss"]), len(ok), sum(r["tag"] == tag for r in rows)))
+        else:
             print(f"{tag}: every run diverged")
-            continue
-        b = min(ok, key=lambda r: r["final_val_loss"])
-        print(f"{b['tag']}:{b['matrix_lr']:g}:{b['base_lr']:g}    val={b['final_val_loss']:.4f} "
-              f"({len(ok)}/{sum(r['tag'] == tag for r in rows)} runs ok)")
+    return out
+
+
+def best_specs(pattern: str) -> list[str]:
+    """Ready-to-use `scale` specs (tag:matrix_lr:base_lr), one per optimiser."""
+    return [f"{b['tag']}:{b['matrix_lr']:g}:{b['base_lr']:g}" for b, _, _ in best_runs(pattern)]
+
+
+def print_best(pattern: str):
+    """Best (matrix_lr, base_lr) per optimiser, as ready-to-paste scale specs."""
+    for b, n_ok, n_tot in best_runs(pattern):
+        print(f"{b['tag']}:{b['matrix_lr']:g}:{b['base_lr']:g}    val={b['final_val_loss']:.4f} ({n_ok}/{n_tot} runs ok)")
 
 
 def main():
