@@ -3,5 +3,5 @@ numpy
 matplotlib
 scipy
 pytest
-# Hypothesis 2 (CIFAR-10 / ViT) only:
-# torchvision
+# CIFAR-10 experiments (train_cifar.py):
+torchvision

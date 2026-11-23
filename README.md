@@ -22,7 +22,7 @@ vs. SGD / TruncatedSGD.
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -q tests                      # 34 tests
+python -m pytest -q tests                      # 48 tests (GPT + CIFAR)
 python prepare_shakespeare.py                  # downloads tinyshakespeare (~1.1 MB)
 python train_gpt.py --optimizer muon
 python train_gpt.py --optimizer freon --c 0.6667
@@ -34,8 +34,10 @@ python train_gpt.py --optimizer truncsgd --trunc_frac 0.05 --momentum 0.9
 ## Hypothesis 1 protocol (reduced from the paper's App. A to fit compute)
 
 1. **Benchmark** the device: `python bench.py` (pick `--freon_impl svd` vs `eigh` from the result).
-2. **Tune** `(matrix_lr, base_lr)` per optimizer, seed 42, 1500 iters/run (paper grid; SGD/TruncatedSGD get a larger-lr grid):
-   `python sweep.py tune --opts muon kaon freon:0.6667 freon:0.75 sgd truncsgd:0.05 --max_iters 1500 --out results/tune.jsonl`
+2. **Tune** `(matrix_lr, base_lr)` per optimizer, seed 42, 1500 iters/run. `--grid full` = the paper's 16 pairs (SGD/TruncatedSGD get a
+   larger-lr grid); `--grid focused` = 9 pairs (matrix_lr {1e-2, 2e-2, 4e-2} × base_lr {5e-4, 1e-3, 2e-3}) chosen after the full-grid
+   Muon/Kaon runs peaked at matrix_lr 2e-2, the top of the full grid:
+   `python sweep.py tune --grid focused --opts muon kaon freon:0.6667 freon:0.75 sgd truncsgd:0.05 --max_iters 1500 --out results/tune.jsonl`
    then `python sweep.py best --out results/tune.jsonl` prints the best `spec:matrix_lr:base_lr` per optimizer.
 3. **Final**: 3 seeds (42/43/44) × 5000 iters at the best lrs:
    `python sweep.py scale --opts <specs from step 2> --rhos 1 --out results/final.jsonl`
@@ -62,10 +64,10 @@ Caveat: learning rates are tuned at 1500 iterations but used at 5000; optima can
 - Defaults not given in the spec (my choices, easy to change in `TrainConfig`): dropout 0.2, ctx 256, batch 64,
   5000 iters, 100-step warmup + cosine to 10%, eval every 250 steps over 50 batches.
 
-## Hypothesis 3 hook (not built yet)
+## Hypothesis 3
 
-`c⋆ = β / (2α)` (App. H.3 eq. 50): fit `log σᵢ ≈ −α log i` and `log kᵢ ≈ −β log i` with `kᵢ = ‖Aᵀvᵢ‖²`, clamp to
-[−0.5, 1.5]. The random-feature code is in <https://github.com/damek/specgd/> (Davis & Drusvyatskiy).
+The c⋆ = β/(2α) estimator is implemented in `spectral/cstar.py` and run on CIFAR-10 (see the CIFAR-10 section below).
+Formula: App. H.3 eq. 50; random-feature reference code: <https://github.com/damek/specgd/> (Davis & Drusvyatskiy).
 
 ## Compute
 
@@ -100,3 +102,39 @@ Measured on a **Colab NVIDIA L4** (bf16 autocast, batched maps), same model:
 
 Use `--freon_impl eigh` on GPU. Colab T4 (no native bf16) was ~8x slower: Muon 0.52 s/iter.
 Freon and TruncatedSGD are dominated by the per-step decomposition, not the forward/backward pass.
+
+## CIFAR-10 (all three hypotheses)
+
+Separate from the Shakespeare/GPT code; nothing above is changed by it.
+
+| path | what |
+|---|---|
+| `spectral/vision.py` | `ViT` (dim 256, depth 6, heads 4, patch 4, ~3.2M params, 24 spectral matrices) and a small `ResNet` (widths 64/128/256, conv filters flattened to `(out, in·kh·kw)`). Patch-embed/stem, head, pos-emb, cls token and norms go to AdamW. |
+| `spectral/cstar.py` | Hypothesis 3 estimator: per spectral layer, fit `log σᵢ ≈ −α log i` on the gradient and `log kᵢ ≈ −β log i` with `kᵢ = ‖X vᵢ‖²/n` (X = layer inputs, unfolded patches for convs), `c⋆ = β/(2α)` clamped to [−0.5, 1.5]. |
+| `train_cifar.py` | one run (CLI + `run(cfg)`); data lives on the device with on-device crop+flip; bf16 autocast on CUDA; `--cstar_every N` logs c⋆ every N epochs; logs to `runs/cifar/.../log.json` |
+| `sweep_cifar.py` | `tune` (16-point grid; a larger-lr grid for sgd/truncsgd), `scale` (ρ × 3 seeds), `csweep` (Freon over c ∈ {0 … 1} × 3 seeds, c⋆ logged every 5 epochs). Resumable JSONL. `--set arch=resnet epochs=50` passes config through. |
+| `analyze_cifar.py` | tables + plots: best lrs per optimiser (prints the `scale` command), accuracy vs ρ (mean ± 2 std), accuracy vs c with the predicted c⋆ line |
+| `notebooks/colab_cifar_hypothesis1.ipynb` | Colab pipeline for H1 on CIFAR-10: setup → benchmark → tune → 3-seed final runs → summary (+ optional ρ sweep) |
+| `tests/test_cifar.py` | model splits, augmentation, c⋆ recovery on synthetic spectra, probe has no side effects, fake-data training smoke tests |
+
+```bash
+python train_cifar.py --dataset fake --epochs 1 --dim 64 --depth 2   # smoke test, no download
+python train_cifar.py --optimizer freon --c 0.6667                   # downloads CIFAR-10 to data/cifar10
+
+# H1: optimiser comparison
+python sweep_cifar.py tune --opts muon kaon freon:0.6667 freon:0.75 sgd truncsgd:0.05 --out results/cifar_tune.jsonl
+python analyze_cifar.py tune results/cifar_tune.jsonl          # prints the scale command
+python sweep_cifar.py scale --opts muon:<m>:<b> ... --out results/cifar_scale.jsonl
+python analyze_cifar.py scale results/cifar_scale.jsonl
+# H2 (vision): run the same H1 commands with --set arch=resnet for a conv-net comparison
+# H3: is the empirically best c close to the predicted c*?
+python sweep_cifar.py csweep --lrs <freon m> <freon b> --out results/cifar_csweep.jsonl
+python analyze_cifar.py csweep results/cifar_csweep.jsonl
+```
+
+`train_cifar.py` / `sweep_cifar.py` take the same speed options as the GPT scripts (`--freon_impl eigh`, `--no-amp`,
+TF32 on CUDA; run `bench.py` to choose the Freon implementation) and `sweep_cifar.py` reuses `sweep.py`'s spec parsing
+and resume logic, so spec strings and `--rhos 1` final runs work the same way.
+
+Defaults that are my choices (change in `CifarConfig`): 30 epochs, batch 512, 1 warmup epoch + cosine to 10%,
+AdamW wd 0.05 on non-spectral matrices, no label smoothing, c⋆ probe = 256 fixed un-augmented training images.
