@@ -204,6 +204,7 @@ def table():
     for i, r in enumerate(rows):
         c = cells(r, tex=True)
         c[0] = c[0] if "$" in c[0] else c[0].replace("%", r"\%")
+        c[5] = c[5].replace("<0.01", "$<0.01$")
         c[3] = f"${c[3]}$"
         c[6] = f"${c[6]}$"
         if r["best"][0] == top:
