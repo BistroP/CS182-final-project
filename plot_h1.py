@@ -1,6 +1,6 @@
 """Plot Hypothesis-1 learning curves (val loss vs iteration) from runs/scale/*/log.json.
 
-    python plot_h1.py --runs /content/drive/MyDrive/cs182_results/runs/scale --out h1_curves.png
+    python plot_h1.py --runs results/h1_runs --out h1_curves.png
 
 Each run's best val loss (the spec's metric) is marked with a dot; the last point is the `final` loss.
 Muon/Freon/Kaon dip and then rise (overfitting on Shakespeare-char), SGD/TruncatedSGD keep improving more slowly.
