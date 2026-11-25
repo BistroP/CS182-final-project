@@ -46,7 +46,7 @@ def main():
 
     curves = load(Path(args.runs), args.seed)
     assert curves, f"no seed-{args.seed} logs under {args.runs}"
-    fig, ax = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True)
+    fig, ax = plt.subplots(1, 2, figsize=(12, 4.5), sharey=False)
     for k, tag in enumerate([t for t in ORDER if t in curves] + [t for t in curves if t not in ORDER]):
         log = curves[tag]
         it = [r["iter"] for r in log]
@@ -59,7 +59,8 @@ def main():
         print(f"{LABELS.get(tag, tag):16s} best {val[best]:.4f} @ iter {it[best]:5d}   final {val[-1]:.4f}")
     ax[0].set_title("validation loss (dots = best)")
     ax[1].set_title("zoom")
-    ax[1].set_ylim(1.40, 1.70)
+    ax[1].set_ylim(1.43, 1.60)
+    ax[1].set_xlim(1000, 5100)
     for a in ax:
         a.set_xlabel("iteration")
         a.grid(alpha=0.3)

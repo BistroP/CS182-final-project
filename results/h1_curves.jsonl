@@ -1,0 +1,6 @@
+{"tag": "freon:0.6667", "matrix_lr": 0.02, "base_lr": 0.001, "seed": 42, "final_val_loss": 1.500531973838806, "best_val_loss": 1.443628740310669, "diverged": false}
+{"tag": "kaon", "matrix_lr": 0.04, "base_lr": 0.002, "seed": 42, "final_val_loss": 1.5429127216339111, "best_val_loss": 1.4404944109916686, "diverged": false}
+{"tag": "muon", "matrix_lr": 0.02, "base_lr": 0.001, "seed": 42, "final_val_loss": 1.5382126331329347, "best_val_loss": 1.440465111732483, "diverged": false}
+{"tag": "sgd", "matrix_lr": 10.0, "base_lr": 0.002, "seed": 42, "final_val_loss": 1.4654634475708008, "best_val_loss": 1.4575429010391234, "diverged": false}
+{"tag": "freon:0.75", "matrix_lr": 0.02, "base_lr": 0.001, "seed": 42, "final_val_loss": 1.4974352312088013, "best_val_loss": 1.443303916454315, "diverged": false}
+{"tag": "truncsgd:0.05", "matrix_lr": 10.0, "base_lr": 0.004, "seed": 42, "final_val_loss": 1.4849506855010985, "best_val_loss": 1.4849506855010985, "diverged": false}
