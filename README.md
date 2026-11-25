@@ -48,6 +48,27 @@ Caveat: learning rates are tuned at 1500 iterations but used at 5000; optima can
 
 **On Colab:** open `notebooks/colab_hypothesis1.ipynb` (runtime → GPU) and run top to bottom.
 
+## Hypothesis 1 results (Colab L4, seeds 42/43/44, 5000 iters, lrs tuned at 1500 iters)
+
+Mean ± std over 3 seeds. `best` = lowest val loss seen during training (the spec's metric); `final` = last iteration.
+
+| optimizer | lrs (matrix, base) | best val | final val |
+|---|---|---|---|
+| Muon | 0.02, 1e-3 | 1.4438 ± 0.0053 | 1.5355 ± 0.0043 |
+| Freon c=2/3 | 0.02, 1e-3 | 1.4449 ± 0.0031 | 1.4991 ± 0.0052 |
+| Kaon | 0.04, 2e-3 | 1.4480 ± 0.0057 | 1.5568 ± 0.0064 |
+| Freon c=3/4 | 0.02, 1e-3 | 1.4479 ± 0.0056 | 1.4912 ± 0.0087 |
+| SGD (mom. 0.9) | 10, 2e-3 | 1.4716 ± 0.0222 | 1.4819 ± 0.0155 |
+| TruncatedSGD 5% | 10, 4e-3 | 1.4875 ± 0.0015 | 1.4875 ± 0.0015 |
+
+- On `best`, Muon, Freon 2/3, Freon 3/4 and Kaon agree within seed noise (spread 0.004 vs std ≈ 0.005).
+  SGD and TruncatedSGD are behind (0.03 and 0.04), but SGD's gap is ~1.5 std of its own seed noise.
+- `final` reverses the ranking: Shakespeare-char overfits (5000 iters ≈ 80 epochs, dropout 0.2), and the
+  faster optimizers overfit more. SGD/TruncatedSGD are still improving at the end, so their curves have not turned up.
+- SGD's stage-1 loss at 1500 iters (≈1.81) is far worse than Muon's (1.44), yet by 5000 iters it nearly catches up:
+  the gap is mostly convergence speed, not a different final level.
+- Best SGD/TruncatedSGD lrs lie at the top of the grids searched (matrix_lr 10; truncsgd base_lr 4e-3).
+
 ## Implementation notes / decisions
 
 - **What the spectral optimizers touch:** the 4 matrices per block (`c_attn`, attn `c_proj`, `c_fc`,
